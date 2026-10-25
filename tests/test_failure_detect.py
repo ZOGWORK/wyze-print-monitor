@@ -196,3 +196,18 @@ def test_teaching_never_lowers_a_high_normal():
     scorer.ewm_mean = 2.0
     scorer.teach_normal()
     assert scorer.baseline.rolling_mean_long == 1.5
+
+
+def test_watch_area_keeps_only_detections_on_the_bed():
+    bed = fd.Detection(0.5, (0.4, 0.4, 0.6, 0.6))
+    shelf = fd.Detection(0.6, (0.05, 0.72, 0.12, 0.8))  # off to the side
+    assert fd.in_area([bed, shelf], (0.25, 0.2, 0.85, 0.95)) == [bed]
+    assert fd.in_area([bed, shelf], None) == [bed, shelf]
+
+
+def test_clean_area_rejects_junk_and_tiny_boxes():
+    assert fd.clean_area([0.8, 0.9, 0.2, 0.1]) == (0.2, 0.1, 0.8, 0.9)
+    assert fd.clean_area([-1, 0, 2, 1]) == (0.0, 0.0, 1.0, 1.0)
+    assert fd.clean_area([0.5, 0.5, 0.51, 0.9]) is None
+    for junk in (None, "abc", [1, 2], {}):
+        assert fd.clean_area(junk) is None

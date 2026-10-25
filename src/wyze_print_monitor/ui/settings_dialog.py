@@ -287,6 +287,24 @@ class SettingsDialog(QDialog):
         _select(self.interval_combo, settings.ai_check_interval_s)
         self.interval_combo.setToolTip("Less often uses less CPU, but notices problems later.")
         watch_form.addRow("Check every", self.interval_combo)
+        self._area_pending = False  # a new watch area, applied on Save
+        self._area = self._watch.watch_area() if self._watch is not None else None
+        self.area_label = QLabel()
+        self.area_btn = QPushButton("Mark the print bed…")
+        self.area_btn.setToolTip("Ignore anything the camera sees outside the bed (cables, shelves, the floor).")
+        self.area_btn.clicked.connect(self._on_watch_area)
+        area_row = QHBoxLayout()
+        area_row.addWidget(self.area_label, 1)
+        area_row.addWidget(self.area_btn)
+        watch_form.addRow("Watch area", area_row)
+        self._refresh_area_label()
+        self.without_studio_check = QCheckBox("Also watch when Studio isn't showing a print")
+        self.without_studio_check.setChecked(settings.ai_watch_without_studio)
+        self.without_studio_check.setToolTip(
+            "For prints started without eufyMake Studio. Watching then runs whenever "
+            "the video is on, even with nothing printing, so it may alert for nothing."
+        )
+        watch_form.addRow(self.without_studio_check)
 
         self.sound_combo = QComboBox()
         self.sound_combo.addItem("Alarm until I respond (failures), chime otherwise", "alarm")
@@ -336,6 +354,22 @@ class SettingsDialog(QDialog):
         self._refresh_watch()
         return page
 
+    def _refresh_area_label(self) -> None:
+        self.area_label.setText("The print bed only" if self._area else "The whole picture")
+
+    def _on_watch_area(self) -> None:
+        from .watch_area import WatchAreaDialog
+
+        frame = self._watch.latest_frame() if self._watch is not None else None
+        if frame is None or not self._watch.has_camera():
+            QMessageBox.information(self, "Watch area", "Start the video first: the bed is marked on the camera picture.")
+            return
+        dialog = WatchAreaDialog(frame, self._area, self)
+        if dialog.exec() == QDialog.Accepted:
+            self._area = dialog.area
+            self._area_pending = True
+            self._refresh_area_label()
+
     def _refresh_sound_note(self) -> None:
         """Kept live: the sound connection can drop or recover while open."""
         sound = self._watch.sound_status() if self._watch is not None else ""
@@ -366,6 +400,8 @@ class SettingsDialog(QDialog):
             self.alert_level_combo,
             self.pause_after_combo,
             self.interval_combo,
+            self.area_btn,
+            self.without_studio_check,
         ):
             widget.setEnabled(on)
         self.pause_after_combo.setEnabled(on and self.auto_pause_check.isChecked())
@@ -543,6 +579,9 @@ class SettingsDialog(QDialog):
         s.ai_sound = self.sound_combo.currentData()
         s.ai_notifications = self.notify_check.isChecked()
         s.ai_popup = self.popup_check.isChecked()
+        s.ai_watch_without_studio = self.without_studio_check.isChecked()
+        if self._area_pending and self._watch is not None:
+            self._watch.set_watch_area(self._area)
         mac =self.camera_combo.currentData()
         if mac:
             s.camera_mac = mac
