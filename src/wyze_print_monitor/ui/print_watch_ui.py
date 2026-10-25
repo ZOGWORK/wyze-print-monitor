@@ -398,8 +398,11 @@ class PrintWatch(QObject):
         view = self._observe()
         if not view.running:
             # Studio closed: a print it showed carries on without it, so keep
-            # what we knew (nothing, if it never showed one).
-            pass
+            # what we knew (nothing, if it never showed one). But "idle" is
+            # stale once Studio's gone: with "watch without Studio" on, a
+            # print started some other way must be watched.
+            if self._printing is False and self.settings.ai_watch_without_studio:
+                self._set_print_state(None, False)
         elif view.ours and view.status in ("running", "paused", "idle"):
             # The status label, not the buttons: while heating there's no
             # Pause button yet, but the print is under way.

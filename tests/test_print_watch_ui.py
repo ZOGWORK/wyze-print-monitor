@@ -511,6 +511,7 @@ def test_without_studio_it_waits_for_a_print(env):
     studio.running = False  # Studio was never open: no telling if anything prints
     w = pw.PrintWatch(main)
     w._poll_studio()
+    w.model_ready = lambda: True  # no model download in tests
     w._url, w.last_check = "rtsp://cam/stream0", 1.0  # video on (no real workers)
     assert w.status_text().startswith("Print watch: waiting for a print")
     w._on_checked(_result(WARNING))
@@ -546,3 +547,18 @@ def test_watch_area_is_per_camera_and_starts_the_normal_over(env):
     assert w.watch_area() == (0.2, 0.1, 0.8, 0.9)
     w.set_watch_area(None)
     assert w.watch_area() is None
+
+
+def test_watch_without_studio_overrides_a_stale_idle(env):
+    w, main, studio, _clock, _n = env
+    studio.controls = {}  # Studio last showed the printer idle
+    w._poll_studio()
+    assert w._printing is False
+    studio.running = False  # then closed; a print starts from elsewhere
+    w._poll_studio()
+    w._on_checked(_result(WARNING))
+    assert w.alert is None  # off: idle stands
+    main.settings.ai_watch_without_studio = True
+    w._poll_studio()
+    w._on_checked(_result(WARNING))
+    assert w.alert is not None and w.alert.severity == "warning"
