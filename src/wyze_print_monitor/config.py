@@ -121,6 +121,12 @@ class Settings:
     ai_popup: bool = True  # pop-up alert card on top of other windows
     ai_pause_after_s: int = 30  # a failure must hold this long before pausing
     ai_check_interval_s: int = 10  # seconds between AI checks
+    # Without Studio there's no telling whether a print is running: watch
+    # anyway (alerts only) instead of waiting for Studio to show one.
+    ai_watch_without_studio: bool = False
+    # Where the print is, per camera: {camera_key: [x1, y1, x2, y2]} as 0..1
+    # fractions of the picture. Anything the model sees outside it is ignored.
+    ai_watch_area: dict = field(default_factory=dict)
     # This camera's long-term "normal" for the model (failure_detect.Baseline).
     ai_baseline: dict = field(default_factory=dict)
 

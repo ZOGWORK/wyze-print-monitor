@@ -23,7 +23,16 @@ from typing import Callable
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 
-from .failure_detect import CHECK_INTERVAL_S, Baseline, Detection, FailureScorer, postprocess, preprocess
+from .failure_detect import (
+    CHECK_INTERVAL_S,
+    Area,
+    Baseline,
+    Detection,
+    FailureScorer,
+    in_area,
+    postprocess,
+    preprocess,
+)
 from .quality import substream_url
 from .sound_watch import WINDOW_S, SoundAnomaly, band_levels
 
@@ -61,10 +70,12 @@ class VisionWorker(QThread):
         frame_source: Callable[[], np.ndarray | None],
         scorer: FailureScorer,
         interval_s: float = CHECK_INTERVAL_S,
+        area: Area | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._model_path = model_path
+        self._area = area  # only detections in here count (None: everywhere)
         self._frame_source = frame_source
         self.scorer = scorer
         self._interval = interval_s
@@ -99,7 +110,7 @@ class VisionWorker(QThread):
             last = frame
             started = time.perf_counter()
             try:
-                detections = postprocess(session.run(None, {name: preprocess(frame, size)}))
+                detections = in_area(postprocess(session.run(None, {name: preprocess(frame, size)})), self._area)
             except Exception as exc:
                 self.failed.emit(f"Failure detection stopped: {exc}")
                 return

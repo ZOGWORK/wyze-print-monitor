@@ -101,6 +101,35 @@ def postprocess(outputs, conf_thresh: float = DETECTION_THRESH) -> list[Detectio
     return sorted(out, key=lambda d: d.confidence, reverse=True)
 
 
+Area = tuple[float, float, float, float]  # x1, y1, x2, y2 as 0..1 fractions
+MIN_AREA_SIDE = 0.05
+
+
+def clean_area(value) -> Area | None:
+    """A stored watch area, or None (the whole picture) if it isn't one."""
+    try:
+        x1, y1, x2, y2 = (float(v) for v in value)
+    except (TypeError, ValueError):
+        return None
+    x1, x2 = sorted((min(max(x1, 0.0), 1.0), min(max(x2, 0.0), 1.0)))
+    y1, y2 = sorted((min(max(y1, 0.0), 1.0), min(max(y2, 0.0), 1.0)))
+    if x2 - x1 < MIN_AREA_SIDE or y2 - y1 < MIN_AREA_SIDE:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def in_area(detections: list[Detection], area: Area | None) -> list[Detection]:
+    """Only the detections centred inside ``area`` (the print bed): a cable
+    or a shelf off to the side is never a failed print."""
+    if area is None:
+        return detections
+    x1, y1, x2, y2 = area
+    return [
+        d for d in detections
+        if x1 <= (d.box[0] + d.box[2]) / 2 <= x2 and y1 <= (d.box[1] + d.box[3]) / 2 <= y2
+    ]
+
+
 # -------------------------------------------------------------- the decision
 @dataclass
 class Baseline:
@@ -219,10 +248,14 @@ class FailureScorer:
         return scale(p, 0, warn, 0, 1 / 3)
 
 
-def draw_detections(frame: np.ndarray, detections: list[Detection]) -> np.ndarray:
-    """A copy of ``frame`` with the worth-showing boxes outlined (for alerts)."""
+def draw_detections(frame: np.ndarray, detections: list[Detection], area: Area | None = None) -> np.ndarray:
+    """A copy of ``frame`` with the worth-showing boxes outlined (for alerts),
+    and the watch area, if there is one, in a thin gray line."""
     out = frame.copy()
     h, w = out.shape[:2]
+    if area is not None:
+        x1, y1, x2, y2 = area
+        cv2.rectangle(out, (int(x1 * w), int(y1 * h)), (int(x2 * w), int(y2 * h)), (180, 180, 180), max(1, w // 800))
     for d in detections:
         if d.confidence < BOX_DRAW_THRESH:
             continue

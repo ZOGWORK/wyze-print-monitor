@@ -22,10 +22,15 @@ Pressing anything in Studio is guarded twice over:
   doesn't pause we say so loudly instead of pretending.
 
 Print state (running / paused / finished) is only read while we can see the
-camera printer's controls. Switching Studio to another tab or printer
-doesn't end the print as far as we're concerned. Without Studio at all
-there's no way to know, so we watch whenever the stream is live (alerts
+camera printer's controls. Switching Studio to another tab or printer, or
+closing it, doesn't end the print as far as we're concerned. Until Studio
+has shown a print there's no way to know one is running, so we don't watch
+(an empty bed with a cable in view isn't a failed print), unless "watch
+without Studio" is on: then we watch whenever the stream is live (alerts
 only: there's nothing to pause through).
+
+Only what the model sees inside the camera's watch area (the print bed,
+if the user marked it) counts.
 """
 from __future__ import annotations
 
@@ -47,8 +52,10 @@ from ..failure_detect import (
     PAUSE_AFTER_S,
     SENSITIVITY,
     WARNING,
+    Area,
     Baseline,
     FailureScorer,
+    clean_area,
     draw_detections,
 )
 from ..print_watch import SoundWorker, VisionResult, VisionWorker
@@ -72,6 +79,12 @@ def camera_key(url: str) -> str:
     if not url:
         return ""
     return hashlib.sha256(redact_credentials_in_url(url).encode("utf-8")).hexdigest()[:16]
+
+
+def _watch_areas(settings) -> dict:
+    """settings.ai_watch_area: {camera_key: [x1, y1, x2, y2]} (per camera)."""
+    data = settings.ai_watch_area
+    return data if isinstance(data, dict) else {}
 
 
 def _baselines(settings) -> dict:
@@ -244,7 +257,12 @@ class PrintWatch(QObject):
         self._error = ""
         if self.enabled():
             self._vision = VisionWorker(
-                failure_model.model_path(), self._latest_frame, self._scorer, interval_s=interval, parent=self
+                failure_model.model_path(),
+                self._latest_frame,
+                self._scorer,
+                interval_s=interval,
+                area=self.watch_area(),
+                parent=self,
             )
             self._vision.checked.connect(self._on_checked)
             self._vision.failed.connect(self._on_failed)
@@ -303,6 +321,38 @@ class PrintWatch(QObject):
             except OSError:
                 pass
 
+    def watch_area(self) -> Area | None:
+        """Where the print is in this camera's picture (None: everywhere)."""
+        return clean_area(_watch_areas(self.settings).get(self._camera)) if self._camera else None
+
+    def has_camera(self) -> bool:
+        return bool(self._camera)
+
+    def latest_frame(self):
+        return self._latest_frame()
+
+    def set_watch_area(self, area: Area | None) -> None:
+        """Watch only ``area`` from now on. What was normal for the whole
+        picture (and "Looks fine" taught about it) doesn't apply to part of
+        it, so this camera's normal starts over."""
+        if not self._camera:
+            return
+        area = clean_area(area) if area is not None else None
+        if area == self.watch_area():
+            return
+        areas = dict(_watch_areas(self.settings))
+        if area is None:
+            areas.pop(self._camera, None)
+        else:
+            areas[self._camera] = list(area)
+        self.settings.ai_watch_area = areas
+        self._stop_workers()  # saves the old baseline
+        # A new scorer: a retired worker may still be using the old one.
+        self._scorer = FailureScorer()
+        self.risk = 0.0
+        self._save_baseline()
+        self._restart_workers()
+
     def check_interval(self) -> int:
         value = self.settings.ai_check_interval_s
         return value if value in CHECK_INTERVALS_S else CHECK_INTERVALS_S[0]
@@ -347,7 +397,12 @@ class PrintWatch(QObject):
     def _poll_studio(self) -> None:
         view = self._observe()
         if not view.running:
-            self._set_print_state(None, False)
+            # Studio closed: a print it showed carries on without it, so keep
+            # what we knew (nothing, if it never showed one). But "idle" is
+            # stale once Studio's gone: with "watch without Studio" on, a
+            # print started some other way must be watched.
+            if self._printing is False and self.settings.ai_watch_without_studio:
+                self._set_print_state(None, False)
         elif view.ours and view.status in ("running", "paused", "idle"):
             # The status label, not the buttons: while heating there's no
             # Pause button yet, but the print is under way.
@@ -366,12 +421,16 @@ class PrintWatch(QObject):
         if not (view.ours and view.status == "blank"):
             self._unreadable_since = None
         self._advance_pause()
-        idle = self._printing is False or self._print_paused
+        idle = self._printing is False or self._print_paused or not self._watching_unknown()
         for worker in (self._vision, self._sound):
             if worker is not None:
                 worker.paused = idle
         self._refresh_alert_actions()
         self.status_changed.emit()
+
+    def _watching_unknown(self) -> bool:
+        """Whether to watch now, as far as an unknown print state goes."""
+        return self._printing is not None or bool(self.settings.ai_watch_without_studio)
 
     def _set_print_state(self, printing: bool | None, paused: bool) -> None:
         was_printing, was_paused = self._printing, self._print_paused
@@ -585,6 +644,8 @@ class PrintWatch(QObject):
             self._save_baseline_soon = False
             self._save_baseline()  # incl. right after "Looks fine" taught it
         self.status_changed.emit()
+        if self._printing is False or not self._watching_unknown():
+            return  # a check that was under way when the print ended
         now = time.monotonic()
         if now < self._snooze_until:
             return  # "Looks fine": quiet, failures included
@@ -623,7 +684,7 @@ class PrintWatch(QObject):
             return  # already told the user; don't repeat every 10 s
         if not self.settings.ai_auto_pause:
             why = " (auto-pause is off)"
-        elif self._printing is None:
+        elif self._printing is None or not self._view.running:
             why = " (open eufyMake Studio's Device tab to let it pause prints)"
         else:
             why = " (Studio isn't showing this printer's Pause button)"
@@ -696,7 +757,7 @@ class PrintWatch(QObject):
         if frame is None:
             return ""
         if result is not None:
-            frame = draw_detections(frame, result.detections)
+            frame = draw_detections(frame, result.detections, self.watch_area())
         folder = self.settings.resolved_snapshot_dir()
         try:
             os.makedirs(folder, exist_ok=True)
@@ -726,6 +787,8 @@ class PrintWatch(QObject):
             return "Print watch: waiting for video"
         if self._printing is False:
             return "Print watch: idle (no print running)"
+        if not self._watching_unknown():
+            return "Print watch: waiting for a print"
         if self._print_paused:
             return "Print watch: print paused"
         if not self.last_check:

@@ -504,3 +504,61 @@ def test_resuming_keeps_the_sound_checks_learning(env):
     w._poll_studio()
     assert w._vision.reset_requested and not w._sound.reset_requested
     w._vision = w._sound = None
+
+
+def test_without_studio_it_waits_for_a_print(env):
+    _w, main, studio, _clock, notes = env
+    studio.running = False  # Studio was never open: no telling if anything prints
+    w = pw.PrintWatch(main)
+    w._poll_studio()
+    w.model_ready = lambda: True  # no model download in tests
+    w._url, w.last_check = "rtsp://cam/stream0", 1.0  # video on (no real workers)
+    assert w.status_text().startswith("Print watch: waiting for a print")
+    w._on_checked(_result(WARNING))
+    w._on_checked(_result(FAILURE))
+    assert w.alert is None and studio.pressed == []
+    main.settings.ai_watch_without_studio = True  # the user's choice: watch anyway
+    w._on_checked(_result(WARNING))
+    assert w.alert.severity == "warning"
+    w.shutdown()
+
+
+def test_closing_studio_mid_print_keeps_watching(env):
+    w, _main, studio, _clock, _n = env
+    studio.running = False
+    w._poll_studio()
+    assert w._printing is True
+    w._on_checked(_result(WARNING))
+    assert w.alert.severity == "warning"
+
+
+def test_watch_area_is_per_camera_and_starts_the_normal_over(env):
+    w, main, _studio, _clock, _n = env
+    main.settings.sound_alerts = False
+    w.set_stream("rtsp://u:p@cam-one/stream0")
+    for _ in range(40):
+        w._scorer.update([])
+    w.set_watch_area((0.2, 0.1, 0.8, 0.9))
+    assert w.watch_area() == (0.2, 0.1, 0.8, 0.9)
+    assert w._scorer.baseline.lifetime_frames == 0
+    w.set_stream("rtsp://u:p@cam-two/stream0")
+    assert w.watch_area() is None
+    w.set_stream("rtsp://u:p@cam-one/stream0")
+    assert w.watch_area() == (0.2, 0.1, 0.8, 0.9)
+    w.set_watch_area(None)
+    assert w.watch_area() is None
+
+
+def test_watch_without_studio_overrides_a_stale_idle(env):
+    w, main, studio, _clock, _n = env
+    studio.controls = {}  # Studio last showed the printer idle
+    w._poll_studio()
+    assert w._printing is False
+    studio.running = False  # then closed; a print starts from elsewhere
+    w._poll_studio()
+    w._on_checked(_result(WARNING))
+    assert w.alert is None  # off: idle stands
+    main.settings.ai_watch_without_studio = True
+    w._poll_studio()
+    w._on_checked(_result(WARNING))
+    assert w.alert is not None and w.alert.severity == "warning"

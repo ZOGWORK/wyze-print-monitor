@@ -218,7 +218,11 @@ before it pauses (30 s / 1 min / 2 min) and how often it checks (10 / 20 /
 30 s); *Test alert* shows exactly what you'll get.
 
 It only runs while Studio shows a print running — about 1% of a modern CPU
-at the default 10-second checks. *Looks fine* on an alert keeps it quiet for 30 minutes **and teaches it**:
+at the default 10-second checks. If Studio isn't open it waits, unless you
+turn on *Also watch when Studio isn't showing a print* (for prints started
+some other way; it may then alert with nothing printing). *Mark the print
+bed…* lets you drag a box around the bed on the camera picture, and anything
+the model sees outside it (shelves, cables, the floor) is ignored. *Looks fine* on an alert keeps it quiet for 30 minutes **and teaches it**:
 on an AI alert, what the camera saw counts more as normal for your setup
 (a cable or purge line that fooled it alerts less next time; this fades by
 itself over many hours if the scene changes); on a sound alert, the rest of
