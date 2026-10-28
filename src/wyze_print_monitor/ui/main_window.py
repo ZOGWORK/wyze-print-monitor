@@ -62,6 +62,7 @@ from .binder import PanelBinder
 from .icons import ICON_CAMERA, ICON_FOLDER, ICON_FULLSCREEN, ICON_RECORD, ICON_TIMER, tool_button
 from .settings_dialog import SettingsDialog, forget_secrets
 from .alert_popup import AlertPopup
+from .print_schedule import PrintScheduler
 from .print_watch_ui import PrintWatch
 from .update_ui import UpdateManager
 from .views import VIEWS_QSS, CameraPanel, VideoView
@@ -152,6 +153,8 @@ class MainWindow(QMainWindow):
 
         self.update_manager = UpdateManager(self)
         self.print_watch = PrintWatch(self)
+        self.print_scheduler = PrintScheduler(self)
+        self._queue_window = None
         self.alert_popup = AlertPopup(self)
         self.update_manager.available.connect(self._on_update_available)
 
@@ -514,6 +517,15 @@ class MainWindow(QMainWindow):
         watch_settings.triggered.connect(lambda: self._open_settings(tab="watch"))
         settings_menu.addAction(watch_settings)
 
+        print_menu = self.menuBar().addMenu("Print")
+        schedule_action = QAction("Schedule print…", self)
+        schedule_action.setToolTip("Print what's sliced in eufyMake Studio at a set time")
+        schedule_action.triggered.connect(self.schedule_print)
+        print_menu.addAction(schedule_action)
+        queue_action = QAction("Print queue", self)
+        queue_action.triggered.connect(self.show_print_queue)
+        print_menu.addAction(queue_action)
+
         help_menu = self.menuBar().addMenu("Help")
         about_action = QAction("About Wyze Print Monitor", self)
         about_action.triggered.connect(self._show_about)
@@ -521,6 +533,20 @@ class MainWindow(QMainWindow):
         updates_action.triggered.connect(lambda: self.update_manager.check(silent=False))
         help_menu.addAction(updates_action)
         help_menu.addAction(about_action)
+
+    def schedule_print(self) -> None:
+        from .schedule_ui import open_schedule_dialog
+
+        open_schedule_dialog(self, self.print_scheduler)
+
+    def show_print_queue(self) -> None:
+        from .schedule_ui import QueueWindow
+
+        if self._queue_window is None:
+            self._queue_window = QueueWindow(self, self.print_scheduler)
+        self._queue_window.show()
+        self._queue_window.raise_()
+        self._queue_window.activateWindow()
 
     def _show_about(self) -> None:
         QMessageBox.about(
@@ -1318,6 +1344,9 @@ class MainWindow(QMainWindow):
         self._retired_readers.clear()
         self.update_manager.shutdown()
         self.print_watch.shutdown()
+        self.print_scheduler.alarm.stop()
+        if self._queue_window is not None:
+            self._queue_window.close()
         self.alert_popup.close()
         self.runner.stop()
         save_settings(self.settings)

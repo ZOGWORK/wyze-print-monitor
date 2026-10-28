@@ -123,6 +123,8 @@ class Settings:
     ai_check_interval_s: int = 10  # seconds between AI checks
     # This camera's long-term "normal" for the model (failure_detect.Baseline).
     ai_baseline: dict = field(default_factory=dict)
+    # Scheduled prints, pending and recent (schedule.ScheduledPrint dicts).
+    print_queue: list = field(default_factory=list)
 
     def resolved_snapshot_dir(self) -> str:
         if self.snapshot_dir:
