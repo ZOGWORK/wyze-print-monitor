@@ -114,6 +114,8 @@ def _make_tray(app: QApplication, window: MainWindow) -> QSystemTrayIcon | None:
     tray.setToolTip("Wyze Print Monitor")
     menu = QMenu()
     menu.addAction("Open Wyze Print Monitor", window.show_window)
+    menu.addAction("Schedule print…", window.schedule_print)
+    menu.addAction("Print queue", window.show_print_queue)
     menu.addAction("Settings…", window._open_settings)
     menu.addAction("Check for updates…", lambda: window.update_manager.check(silent=False))
     menu.addSeparator()
@@ -144,9 +146,22 @@ def _make_tray(app: QApplication, window: MainWindow) -> QSystemTrayIcon | None:
         tray.showMessage(title, message, QSystemTrayIcon.Warning, 15000)
 
     window.print_watch.notify.connect(print_alert)
-    tray.messageClicked.connect(
-        lambda: window.update_manager.install() if last["kind"] == "update" else window.show_window()
-    )
+
+    def schedule_note(title: str, message: str) -> None:
+        last["kind"] = "schedule"
+        tray.showMessage(title, message, QSystemTrayIcon.Information, 15000)
+
+    window.print_scheduler.notify.connect(schedule_note)
+
+    def clicked() -> None:
+        if last["kind"] == "update":
+            window.update_manager.install()
+        elif last["kind"] == "schedule":
+            window.show_print_queue()
+        else:
+            window.show_window()
+
+    tray.messageClicked.connect(clicked)
     return tray
 
 
@@ -252,7 +267,11 @@ def main() -> int:
 
         # The panels live inside eufyMake Studio's Device tab; this window and
         # the tray icon are the way back to the full app.
+        from .ui.schedule_ui import StudioScheduleDock
+
         dock = StudioDock(window)
+        # The ▴ on Studio's Print button and the print queue in its printer list.
+        window._schedule_dock = StudioScheduleDock(window, window.print_scheduler)
         app.setQuitOnLastWindowClosed(False)
         window._tray = _make_tray(app, window)
 

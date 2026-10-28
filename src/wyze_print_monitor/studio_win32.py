@@ -7,10 +7,11 @@ labels so :mod:`ui.studio_dock` can place our own panels exactly over the
 Monitor and Others cards.
 
 Only read-only window queries plus two style/z-order tweaks are used, and
-the one way we act on Studio — pressing its print Pause/Stop buttons for the
-print watcher — *posts* mouse messages (never sends), so a busy Studio can
-never stall our UI thread through these calls. Everything degrades to "not
-found" off Windows.
+the ways we act on Studio — pressing its print Pause/Stop buttons for the
+print watcher, and its Slice tab / Print / "Choose a Printer" buttons for
+scheduled prints — *post* mouse messages (never send), so a busy Studio
+can never stall our UI thread through these calls. Everything degrades to
+"not found" off Windows.
 
 The pure helpers at the top (no ctypes) hold the decision logic and are unit
 tested; the Win32 calls below them are thin wrappers.
@@ -28,6 +29,9 @@ PRINTER_LIST_LABEL = "My Printer"
 Rect = tuple[int, int, int, int]  # left, top, width, height (physical px)
 
 PROGRESS_LABEL = "Progress"
+SLICE_TAB_LABEL = "Slice"
+DEVICE_TAB_LABEL = "Device"
+CHOOSE_PRINTER_TITLE = "Choose a Printer"  # the dialog Studio's Print opens
 
 # Studio's print status label (Progress card's bottom bar: "<file> | Printing").
 STATUS_RUNNING = (
@@ -49,6 +53,13 @@ CONTROL_LABELS = {
 # --------------------------------------------------------------------- pure logic
 def is_studio_title(title: str) -> bool:
     return any(marker in title for marker in STUDIO_TITLE_MARKERS)
+
+
+def project_name(title: str) -> str:
+    """The project in Studio's title ("*benchy - eufyMake Studio 3D ..."),
+    or "" for an unsaved "Untitled" one."""
+    name = title.split(" - ", 1)[0].lstrip("*").strip() if " - " in title else ""
+    return "" if name.lower() == "untitled" else name
 
 
 def classify_control(text: str) -> str | None:
@@ -177,6 +188,58 @@ def pick_printer_rows(
     return [hwnd for _top, hwnd in sorted(rows)]
 
 
+def pick_print_button(groups: list[list[tuple[int, Rect]]], window: Rect) -> int | None:
+    """Studio's Slice-tab Print button, which is custom-drawn with no label.
+
+    ``groups`` are the custom controls of each parent window as (hwnd,
+    rect). Print sits in a bar of exactly two same-size wide buttons side by
+    side, Export then Print, at the bottom of the right-hand settings panel:
+    the right one of the only such pair in the window's lower right. Any
+    doubt (no pair, or several) is None.
+    """
+    wx, wy, ww, wh = window
+    hits = []
+    for controls in groups:
+        if len(controls) != 2:
+            continue
+        (_left, r1), (right, r2) = sorted(controls, key=lambda c: c[1][0])
+        x, y, w, h = r2
+        if r1[1:] != r2[1:] or r1[0] + r1[2] > x:
+            continue  # not the same size and row, or overlapping
+        if not (20 <= h <= 80 and w >= 3 * h):
+            continue
+        if x < wx + 0.55 * ww or y < wy + 0.7 * wh:
+            continue
+        hits.append(right)
+    return hits[0] if len(hits) == 1 else None
+
+
+@dataclass
+class ChoosePrinter:
+    """Studio's "Choose a Printer" dialog: one row per printer (in the "My
+    Printer" order), then Cancel and Print."""
+
+    dialog: int
+    rows: list[int]
+    cancel: int
+    print: int
+
+
+def split_choose_printer(
+    dialog: int, rows: list[tuple[int, Rect]], buttons: list[tuple[int, Rect]]
+) -> ChoosePrinter | None:
+    """Rows are the list's entries; the two wide buttons below the list are
+    Cancel (left) and Print (right). Anything else isn't the dialog we know."""
+    if not rows:
+        return None
+    list_bottom = max(r[1] + r[3] for _h, r in rows)
+    below = sorted((r[0], h) for h, r in buttons if r[1] >= list_bottom and r[2] >= 80 and 20 <= r[3] <= 80)
+    if len(below) != 2:
+        return None
+    ordered = [h for _y, h in sorted((r[1], h) for h, r in rows)]
+    return ChoosePrinter(dialog, ordered, below[0][1], below[1][1])
+
+
 @dataclass
 class StudioLayout:
     """The Studio windows we care about (all HWNDs as ints)."""
@@ -190,6 +253,7 @@ class StudioLayout:
     # hides and re-shows ``content`` for a few dozen ms every ~3 s while it
     # refreshes the Device tab; panels inside it blinked along with it.
     host: int = 0
+    sidebar: int = 0  # the "My Printer" column
 
 
 # --------------------------------------------------------------------- Win32
@@ -319,12 +383,13 @@ if sys.platform == "win32":
         monitor_card = mon_chain[mon_chain.index(content) - 1]
         others_card = oth_chain[oth_chain.index(content) - 1]
         rows: list[int] = []
+        sidebar = 0
         if PRINTER_LIST_LABEL in labels:
-            rows = _locate_printer_rows(labels[PRINTER_LIST_LABEL])
+            sidebar, rows = _locate_printer_rows(labels[PRINTER_LIST_LABEL])
         host = _GetParent(content) or content
-        return StudioLayout(top, content, monitor_card, others_card, rows, host)
+        return StudioLayout(top, content, monitor_card, others_card, rows, host, sidebar)
 
-    def _locate_printer_rows(list_label: int) -> list[int]:
+    def _locate_printer_rows(list_label: int) -> tuple[int, list[int]]:
         # Walk up from the "My Printer" label to the whole sidebar column.
         label_rect = window_rect(list_label)
         sidebar = list_label
@@ -339,7 +404,7 @@ if sys.platform == "win32":
         candidates = [
             (h, window_rect(h)) for h in _children(sidebar) if _IsWindowVisible(h)
         ]
-        return pick_printer_rows(candidates, sidebar_rect, label_rect[1] + label_rect[3])
+        return sidebar, pick_printer_rows(candidates, sidebar_rect, label_rect[1] + label_rect[3])
 
     def row_color(row: int) -> tuple[int, int, int] | None:
         """Background color of a printer row, read from the screen — or None
@@ -443,6 +508,151 @@ if sys.platform == "win32":
         ok = _PostMessageW(hwnd, _WM_LBUTTONUP, 0, point) and ok
         return bool(ok)
 
+    _GetWindowThreadProcessId = _sig(
+        _user32.GetWindowThreadProcessId, wt.DWORD, wt.HWND, ctypes.POINTER(wt.DWORD)
+    )
+    _ShowWindow = _sig(_user32.ShowWindow, wt.BOOL, wt.HWND, ctypes.c_int)
+    _SetForegroundWindow = _sig(_user32.SetForegroundWindow, wt.BOOL, wt.HWND)
+    _PrintWindow = _sig(_user32.PrintWindow, wt.BOOL, wt.HWND, wt.HDC, wt.UINT)
+    _CreateCompatibleDC = _sig(_gdi32.CreateCompatibleDC, wt.HDC, wt.HDC)
+    _CreateCompatibleBitmap = _sig(_gdi32.CreateCompatibleBitmap, wt.HBITMAP, wt.HDC, ctypes.c_int, ctypes.c_int)
+    _SelectObject = _sig(_gdi32.SelectObject, wt.HGDIOBJ, wt.HDC, wt.HGDIOBJ)
+    _DeleteObject = _sig(_gdi32.DeleteObject, wt.BOOL, wt.HGDIOBJ)
+    _DeleteDC = _sig(_gdi32.DeleteDC, wt.BOOL, wt.HDC)
+    _SW_RESTORE, _SW_SHOWNOACTIVATE = 9, 4
+    _PW_RENDERFULLCONTENT = 2
+    _WS_CLIPCHILDREN = 0x02000000
+
+    _GetCursorPos = _sig(_user32.GetCursorPos, wt.BOOL, ctypes.POINTER(wt.POINT))
+
+    def is_enabled(hwnd: int) -> bool:
+        return bool(_IsWindowEnabled(hwnd))
+
+    def title(hwnd: int) -> str:
+        return _text(hwnd)
+
+    def parent(hwnd: int) -> int:
+        return _GetParent(hwnd) or 0
+
+    def cursor_pos() -> tuple[int, int]:
+        """The mouse position in physical screen pixels."""
+        p = wt.POINT()
+        _GetCursorPos(ctypes.byref(p))
+        return p.x, p.y
+
+    def find_tab(top: int, label: str) -> int | None:
+        """One of Studio's top tabs ("Slice", "Device"): a Button whose
+        caption is a child label."""
+        for hwnd in _children(top):
+            if _class(hwnd) == "Static" and _text(hwnd) == label:
+                parent = _GetParent(hwnd)
+                if parent and _class(parent) == "Button":
+                    return parent
+        return None
+
+    def find_print_button(top: int) -> int | None:
+        """The Slice tab's Print button, while it's on screen. The bar
+        holds a second pair in the same spot (shown before slicing), so
+        only the visible pair counts."""
+        shown: dict[int, list[tuple[int, Rect]]] = {}
+        for hwnd in _children(top):
+            if _class(hwnd) != "wxWindowNR" or _text(hwnd) != "control" or not _IsWindowVisible(hwnd):
+                continue
+            rect = window_rect(hwnd)
+            if rect[2] > 0 and rect[3] > 0:
+                shown.setdefault(_GetParent(hwnd), []).append((hwnd, rect))
+        return pick_print_button(list(shown.values()), window_rect(top))
+
+    def _process_id(hwnd: int) -> int:
+        pid = wt.DWORD()
+        _GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value
+
+    def process_windows(top: int) -> list[int]:
+        """Studio's visible top-level windows (main window and dialogs)."""
+        pid = _process_id(top)
+        found: list[int] = []
+
+        def cb(hwnd, _lp):
+            if _IsWindowVisible(hwnd) and _process_id(hwnd) == pid:
+                found.append(hwnd)
+            return True
+
+        _EnumWindows(_ENUMPROC(cb), 0)
+        return found
+
+    def find_choose_printer(top: int) -> int | None:
+        return next((h for h in process_windows(top) if _text(h) == CHOOSE_PRINTER_TITLE), None)
+
+    def read_choose_printer(dialog: int) -> ChoosePrinter | None:
+        rows: list[tuple[int, Rect]] = []
+        buttons: list[tuple[int, Rect]] = []
+        for hwnd in _children(dialog):
+            if _class(hwnd) != "wxWindowNR" or not _IsWindowVisible(hwnd):
+                continue
+            parent = _GetParent(hwnd)
+            if parent and _class(parent) == "ListBox":
+                rows.append((hwnd, window_rect(hwnd)))
+            elif _text(hwnd) == "control":
+                buttons.append((hwnd, window_rect(hwnd)))
+        return split_choose_printer(dialog, rows, buttons)
+
+    def window_colors(hwnd: int, points: list[tuple[int, int]]) -> list[tuple[int, int, int]] | None:
+        """Colors of a top-level window's own pixels at screen ``points``,
+        drawn by the window itself (PrintWindow), so they're right even
+        while another window covers it."""
+        x0, y0, w, h = window_rect(hwnd)
+        if w <= 0 or h <= 0:
+            return None
+        screen = _GetDC(None)
+        mem = _CreateCompatibleDC(screen)
+        bitmap = _CreateCompatibleBitmap(screen, w, h)
+        old = _SelectObject(mem, bitmap)
+        try:
+            if not _PrintWindow(hwnd, mem, _PW_RENDERFULLCONTENT):
+                return None
+            colors = []
+            for px, py in points:
+                value = _GetPixel(mem, px - x0, py - y0)
+                if value == _CLR_INVALID:
+                    return None
+                colors.append((value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF))
+            return colors
+        finally:
+            _SelectObject(mem, old)
+            _DeleteObject(bitmap)
+            _DeleteDC(mem)
+            _ReleaseDC(None, screen)
+
+    def selected_rows(rows: list[int]) -> list[bool] | None:
+        """Which of the dialog's printer rows is selected (green-tinted)."""
+        if not rows:
+            return None
+        root = _GetAncestor(rows[0], _GA_ROOT)
+        points = []
+        for row in rows:
+            x, y, _w, h = window_rect(row)
+            points.append((x + 8, y + h // 2))
+        colors = window_colors(root, points)
+        return None if colors is None else [is_selected_row_color(c) for c in colors]
+
+    def restore(top: int) -> None:
+        """Un-minimize without stealing focus (a minimized Studio doesn't
+        lay out its tabs)."""
+        if _IsIconic(top):
+            _ShowWindow(top, _SW_SHOWNOACTIVATE)
+
+    def bring_to_front(top: int) -> None:
+        if _IsIconic(top):
+            _ShowWindow(top, _SW_RESTORE)
+        _SetForegroundWindow(top)
+
+    def ensure_clips_children(hwnd: int) -> None:
+        """Stop a Studio window from painting over our panel inside it."""
+        style = _GetWindowLongPtrW(hwnd, _GWL_STYLE)
+        if not style & _WS_CLIPCHILDREN:
+            _SetWindowLongPtrW(hwnd, _GWL_STYLE, style | _WS_CLIPCHILDREN)
+
     def ensure_clips_siblings(hwnd: int) -> None:
         """Stop a Studio card from painting over the panel we put above it.
 
@@ -487,3 +697,36 @@ else:  # pragma: no cover - non-Windows stubs
 
     def press(hwnd: int) -> bool:
         return False
+
+    def find_tab(top: int, label: str) -> int | None:
+        return None
+
+    def find_print_button(top: int) -> int | None:
+        return None
+
+    def find_choose_printer(top: int) -> int | None:
+        return None
+
+    def read_choose_printer(dialog: int) -> ChoosePrinter | None:
+        return None
+
+    def selected_rows(rows: list[int]) -> list[bool] | None:
+        return None
+
+    def is_visible(hwnd: int) -> bool:
+        return False
+
+    def is_enabled(hwnd: int) -> bool:
+        return False
+
+    def restore(top: int) -> None:
+        pass
+
+    def title(hwnd: int) -> str:
+        return ""
+
+    def parent(hwnd: int) -> int:
+        return 0
+
+    def bring_to_front(top: int) -> None:
+        pass

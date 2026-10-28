@@ -54,6 +54,10 @@ alerts you to failed prints (and pauses them when it's sure).
   - **never stops** a print without asking you.
 - **Unusual-sound alerts:** it learns how your print normally sounds and
   flags grinding, clicking or a loud bang.
+- **Scheduled prints:** a ▴ on Studio's Print button schedules the sliced
+  plate for a date and time. At that time the app presses Print, picks
+  the printer and sends it, and a **print queue** under "My Printer" shows
+  what's coming up and what happened.
 - **Light on your PC:** about 1% CPU for the AI watch, and it only runs while
   a print is running.
 - **Easy install and updates:** a Windows installer, a Start-menu entry, and
@@ -223,6 +227,31 @@ on an AI alert, what the camera saw counts more as normal for your setup
 (a cable or purge line that fooled it alerts less next time; this fades by
 itself over many hours if the scene changes); on a sound alert, the rest of
 that print needs a louder noise to alert again.
+
+### Scheduled prints and the print queue
+
+1. Slice your plate in Studio as usual.
+2. Click the **▴** on the right end of Studio's **Print** button and choose
+   **Schedule this print…**.
+3. Pick a start time (or *In 1 hour*, *Tonight 10 PM*, *Tomorrow 8 AM*),
+   the printer (rows as listed in "My Printer") and an optional name.
+
+At that time the app switches Studio to the Slice tab, presses **Print**
+(slicing first if the plate needs it), selects your printer in *Choose a
+Printer*, checks it really is selected, and presses **Print** there. Then it
+goes back to the Device tab and tells you it was sent.
+
+- **Print queue:** under "My Printer" on the Device tab (or **Print → Print
+  queue**, or the tray icon) you see what's scheduled, with **Print now**,
+  **Edit** and **Cancel**, and recent results.
+- **Keep Studio open and the PC awake.** A print that comes due more than
+  15 minutes late (app closed, PC asleep) is marked *missed*, not started
+  by surprise.
+- **Nothing is guessed.** If Studio isn't open, the printer can't be
+  selected (disconnected or busy), or a window doesn't look as expected,
+  nothing is sent: you get the alarm, a notification and Studio in front.
+- It prints whatever is sliced in Studio **at that time**, so don't load a
+  different plate before it runs.
 
 ### Snapshots, recordings, timelapses
 
