@@ -45,6 +45,7 @@ from .views import VIEWS_QSS
 
 TICK_MS = 300
 FIND_EVERY_S = 1.0  # re-find Studio's Print button / printer column
+BUTTON_RESCAN_S = 3.0  # Print hidden (Device tab, or the pair swapped): search this often
 REFRESH_MS = 30_000  # "in 5 min" texts
 QUEUE_MIN_H = 140  # less room than this in the column: don't show the queue
 
@@ -570,6 +571,7 @@ class StudioScheduleDock(QObject):
         self._sidebar = 0
         self._rows: list[int] = []
         self._last_find = 0.0
+        self._last_button_scan = 0.0
         self._menu: QMenu | None = None
         self._arrow_rect: win.Rect | None = None
         scheduler.changed.connect(self._sync_badge)
@@ -600,13 +602,25 @@ class StudioScheduleDock(QObject):
         self._place_queue()
 
     def _find_parts(self) -> None:
-        button = win.find_print_button(self._top)
-        if button:
-            self._print_button = button
-        layout = win.locate_layout(self._top)
-        if layout is not None and layout.sidebar:
-            self._sidebar = layout.sidebar
-            self._rows = layout.printer_rows
+        # Each search walks Studio's ~2,500 windows: only search again once
+        # what was found is gone (Studio swaps the bar's pair when it slices,
+        # and rebuilds the printer list on refresh).
+        now = time.monotonic()
+        # A hidden button is usually just the other tab: look again now and
+        # then, in case slicing swapped the pair.
+        stale = not win.is_window(self._print_button) or (
+            not win.is_visible(self._print_button) and now - self._last_button_scan >= BUTTON_RESCAN_S
+        )
+        if stale:
+            self._last_button_scan = now
+            button = win.find_print_button(self._top)
+            if button:
+                self._print_button = button
+        if not (win.is_window(self._sidebar) and self._rows and all(win.is_window(r) for r in self._rows)):
+            layout = win.locate_layout(self._top)
+            if layout is not None and layout.sidebar:
+                self._sidebar = layout.sidebar
+                self._rows = layout.printer_rows
 
     # ------------------------------------------------------------------ ▴
     def _place_arrow(self) -> None:

@@ -10,13 +10,14 @@ import datetime
 import os
 import threading
 import time
+from dataclasses import replace
 
 import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
-from .adjust import IDENTITY, AutoLight, ImageAdjustments, apply_adjustments, fit_frame
+from .adjust import IDENTITY, AutoLight, ImageAdjustments, apply_adjustments, fit_frame, zoom_crop
 from .quality import (
     AUTO,
     FULL_HD,
@@ -27,6 +28,11 @@ from .quality import (
     scale_to_height,
     substream_url,
 )
+
+# OpenCV splits each resize / colour pass over every core by default. For
+# one video frame the hand-off costs more than the work: its 16 workers
+# took a whole core at 20 fps where one thread needs a quarter.
+cv2.setNumThreads(1)
 
 # Every blocking FFmpeg call is bounded so stop() can always join the thread.
 OPEN_TIMEOUT_MS = 5000
@@ -92,6 +98,8 @@ class StreamReader(QThread):
         self.last_frame: np.ndarray | None = None
         # Widest view on screen, in device pixels (0 = full size): display
         # images are scaled to this here instead of while painting.
+        # Width the GUI shows the video at, in device pixels: 0 = full size,
+        # -1 = not on screen at all (no display image is made).
         self.display_width = 0
         self.quality = normalize(quality)
         self._auto = AutoQuality(self._substream is not None)
@@ -102,7 +110,8 @@ class StreamReader(QThread):
         self._recorder: ClipRecorder | None = None
         self._timelapse = None  # TimelapseCollector
         self._mailbox_lock = threading.Lock()
-        self._latest: tuple[np.ndarray, QImage] | None = None
+        # (frame before the picture adjustments, display image or None)
+        self._latest: tuple[np.ndarray, QImage | None] | None = None
         self._pending = False
         self._taken = 0  # frames the GUI actually picked up (shown)
         self._reconnect = False
@@ -244,22 +253,29 @@ class StreamReader(QThread):
             self._auto_light.reset()  # turned off: start fresh next time
         self._auto_light_idle = not adjustments.auto_light
         self.last_frame = frame  # for the print watcher (see print_watch)
-        if not adjustments.manual().is_identity():
-            try:
-                frame = apply_adjustments(frame, adjustments)
-            except cv2.error:
-                pass  # never let a bad setting stop the stream
+        identity = adjustments.manual().is_identity()
+        # The adjustments and the display image are the expensive part (about
+        # a CPU core at 1080p): only work out what something actually uses.
+        adjusted = None
         with self._sinks_lock:
+            if self._recorder is not None or self._timelapse is not None:
+                adjusted = frame if identity else _adjusted(frame, adjustments)
             if self._recorder is not None:
                 try:
-                    self._recorder.write(frame)
+                    self._recorder.write(adjusted)
                 except IOError as exc:
                     failed, self._recorder = self._recorder, None
                     # Name the recorder: the GUI may have swapped it since.
                     self.recording_failed.emit(failed, str(exc))
             if self._timelapse is not None:
-                self._timelapse.maybe_capture(frame)
-        image = to_display_image(frame, self.display_width)
+                self._timelapse.maybe_capture(adjusted)
+        width = self.display_width
+        if width < 0:
+            image = None  # nothing on screen shows the video
+        elif adjusted is not None or identity:
+            image = to_display_image(adjusted if adjusted is not None else frame, width)
+        else:
+            image = to_display_image(display_frame(frame, adjustments, width), width)
         with self._mailbox_lock:
             self._latest = (frame, image)
             notify = not self._pending
@@ -303,6 +319,32 @@ class StreamReader(QThread):
             time.sleep(0.1)
 
 
+def _adjusted(frame: np.ndarray, adjustments) -> np.ndarray:
+    try:
+        return apply_adjustments(frame, adjustments)
+    except cv2.error:
+        return frame  # never let a bad setting stop the stream
+
+
+def display_frame(frame: np.ndarray, adjustments, width: int) -> np.ndarray:
+    """``frame`` as ``apply_adjustments`` shows it, made straight at the
+    ``width`` it's displayed at (0 = full size): crop to the zoom, one resize
+    to the shown size, then the colour work on those few pixels. The
+    full-size route resized the crop up to 1080p and back down again."""
+    adj = adjustments.manual()
+    crop = zoom_crop(frame, adj.zoom, adj.pan_x, adj.pan_y) if adj.zoom > 1.0 else frame
+    ch, cw = crop.shape[:2]
+    shown_w = ch if adj.rotation in (90, 270) else cw  # quarter turns swap the axes
+    if 0 < width < shown_w:
+        scale = width / shown_w
+        size = (max(int(round(cw * scale)), 1), max(int(round(ch * scale)), 1))
+        # Linear is 4x faster than area and as good down to half size.
+        crop = cv2.resize(crop, size, interpolation=cv2.INTER_LINEAR if scale >= 0.5 else cv2.INTER_AREA)
+    elif adj.zoom > 1.0:
+        crop = cv2.resize(crop, frame.shape[1::-1], interpolation=cv2.INTER_LINEAR)  # as before
+    return _adjusted(crop, replace(adj, zoom=1.0, pan_x=0.0, pan_y=0.0))
+
+
 def to_display_image(frame: np.ndarray, width: int) -> QImage:
     """An RGB QImage of ``frame`` no wider than ``width`` (0 = full size).
 
@@ -313,8 +355,11 @@ def to_display_image(frame: np.ndarray, width: int) -> QImage:
     if 0 < width < w:
         frame = cv2.resize(frame, (width, max(int(round(h * width / w)), 1)), interpolation=cv2.INTER_AREA)
         h, w = frame.shape[:2]
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+    # 32-bit, the format Qt paints to the screen with: an RGB888 image was
+    # converted again on every paint, on a pool of threads (most of a core).
+    # BGRA bytes are exactly Format_RGB32 on little-endian machines.
+    bgra = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
+    return QImage(bgra.data, w, h, 4 * w, QImage.Format_RGB32).copy()
 
 
 class ClipRecorder:

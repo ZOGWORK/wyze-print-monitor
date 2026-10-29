@@ -133,7 +133,7 @@ def _sharpen_kernel(sharpness: int) -> np.ndarray:
     return k
 
 
-def _crop(frame: np.ndarray, zoom: float, pan_x: float, pan_y: float) -> np.ndarray:
+def zoom_crop(frame: np.ndarray, zoom: float, pan_x: float, pan_y: float) -> np.ndarray:
     """The region a digital zoom shows (a view, not a copy)."""
     h, w = frame.shape[:2]
     cw, ch = max(int(w / zoom), 1), max(int(h / zoom), 1)
@@ -191,7 +191,7 @@ def apply_adjustments(frame: np.ndarray, adj: ImageAdjustments) -> np.ndarray:
     if adj.is_identity():
         return frame
     h, w = frame.shape[:2]
-    out = _crop(frame, adj.zoom, adj.pan_x, adj.pan_y) if adj.zoom > 1.0 else frame
+    out = zoom_crop(frame, adj.zoom, adj.pan_x, adj.pan_y) if adj.zoom > 1.0 else frame
     # Color work runs on the (smaller) crop, before scaling back up.
     if (adj.brightness, adj.contrast, adj.exposure, adj.gamma, adj.temperature) != (0, 0, 0.0, 1.0, 0):
         lut = _tone_lut(adj.brightness, adj.contrast, round(adj.exposure, 2), round(adj.gamma, 2), adj.temperature)

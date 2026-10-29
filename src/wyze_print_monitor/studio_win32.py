@@ -272,8 +272,10 @@ if sys.platform == "win32":
 
     _EnumWindows = _sig(_user32.EnumWindows, wt.BOOL, _ENUMPROC, wt.LPARAM)
     _EnumChildWindows = _sig(_user32.EnumChildWindows, wt.BOOL, wt.HWND, _ENUMPROC, wt.LPARAM)
-    _GetWindowTextLengthW = _sig(_user32.GetWindowTextLengthW, ctypes.c_int, wt.HWND)
-    _GetWindowTextW = _sig(_user32.GetWindowTextW, ctypes.c_int, wt.HWND, wt.LPWSTR, ctypes.c_int)
+    # Reads the text Windows keeps for a window without sending it a
+    # message: GetWindowText(Length) would wait on Studio's UI thread once per
+    # control, thousands of times a scan, stalling Studio while it's busy.
+    _InternalGetWindowText = _sig(_user32.InternalGetWindowText, ctypes.c_int, wt.HWND, wt.LPWSTR, ctypes.c_int)
     _IsWindowVisible = _sig(_user32.IsWindowVisible, wt.BOOL, wt.HWND)
     _IsWindow = _sig(_user32.IsWindow, wt.BOOL, wt.HWND)
     _IsIconic = _sig(_user32.IsIconic, wt.BOOL, wt.HWND)
@@ -302,11 +304,8 @@ if sys.platform == "win32":
     _CLR_INVALID = 0xFFFFFFFF
 
     def _text(hwnd: int) -> str:
-        n = _GetWindowTextLengthW(hwnd)
-        if n <= 0:
-            return ""
-        buf = ctypes.create_unicode_buffer(n + 1)
-        _GetWindowTextW(hwnd, buf, n + 1)
+        buf = ctypes.create_unicode_buffer(512)
+        _InternalGetWindowText(hwnd, buf, 512)
         return buf.value
 
     def window_rect(hwnd: int) -> Rect:

@@ -19,7 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -94,6 +94,7 @@ from .styles import (
 )
 
 TOOLBAR_IDLE_MS = 2500
+SNAP_PX = 2  # image within this many device px of its drawn size: drawn 1:1
 ZOOM_STEP = 1.15  # per wheel notch
 
 # Sheet for every surface. The catch-all QWidget rule comes first; equal
@@ -523,12 +524,29 @@ class VideoView(QWidget):
         self._place_overlays()
 
     # ------------------------------------------------------------------ painting
+    def _draw_image(self, painter: QPainter) -> None:
+        rect = self._image_rect()
+        dpr = self.devicePixelRatioF()
+        iw, ih = self._image.width(), self._image.height()
+        if abs(rect.width() * dpr - iw) <= SNAP_PX and abs(rect.height() * dpr - ih) <= SNAP_PX:
+            # The stream thread already made the image the drawn size: draw it
+            # 1:1 on whole device pixels. Letting Qt "scale" it by a pixel or
+            # two at 125% display scaling cost a full smooth resample on every
+            # frame (most of a CPU core).
+            image = QImage(self._image)  # shares the pixels
+            image.setDevicePixelRatio(dpr)
+            x = round((self.width() * dpr - iw) / 2) / dpr
+            y = round((self.height() * dpr - ih) / 2) / dpr
+            painter.drawImage(QPointF(x, y), image)
+            return
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.drawImage(rect, self._image)
+
     def paintEvent(self, _event) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#000000"))
         if self._image is not None and not self._image.isNull():
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            painter.drawImage(self._image_rect(), self._image)
+            self._draw_image(painter)
             # Soft shades so the chips and toolbar stay readable on bright video.
             top = QLinearGradient(0, 0, 0, 70)
             top.setColorAt(0, QColor(0, 0, 0, 140))
@@ -591,7 +609,7 @@ class VideoView(QWidget):
             self._drag_from = pos
             rect = self._image_rect()
             # A full drag across the picture moves through 2/(zoom-1) of the
-            # pan range (see adjust._crop): dragging right shows more left.
+            # pan range (see adjust.zoom_crop): dragging right shows more left.
             if rect.width() > 0 and rect.height() > 0:
                 self.pan_by.emit(
                     -delta.x() * 2.0 / (rect.width() * (self._zoom - 1.0)),

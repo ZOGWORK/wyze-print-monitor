@@ -33,6 +33,37 @@ def app_icon() -> QIcon:
     return glyph_icon(ICON_CAMERA, "#62d361", 32)
 
 
+LOG_NAME = "errors.log"
+LOG_MAX_BYTES = 512 * 1024
+
+
+def _log_errors() -> None:
+    """The installed app has no console, so errors would vanish: keep them
+    (and native crashes) in errors.log in the config folder."""
+    try:
+        folder = config_dir()
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, LOG_NAME)
+        if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
+            os.replace(path, path + ".old")
+        log = open(path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115 - open for the app's lifetime
+    except OSError:
+        return
+    import faulthandler
+    import traceback
+
+    from . import __version__
+
+    log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} started {__version__}\n")
+    faulthandler.enable(log)
+
+    def hook(kind, value, tb) -> None:
+        log.write(f"{time.strftime('%H:%M:%S')} ")
+        log.write("".join(traceback.format_exception(kind, value, tb)))
+
+    sys.excepthook = hook  # Qt slots report their exceptions through this
+
+
 def _set_windows_app_id() -> None:
     """Give the process its own taskbar identity, so Windows shows our icon
     (and groups our windows) instead of python.exe's."""
@@ -246,6 +277,7 @@ def main() -> int:
         index = sys.argv.index("--self-test")
         report = sys.argv[index + 1] if len(sys.argv) > index + 1 else "self-test.txt"
         return self_test(report)
+    _log_errors()
     if sys.platform == "win32":
         _set_windows_app_id()  # must happen before any window exists
     app = QApplication(sys.argv)
@@ -277,6 +309,15 @@ def main() -> int:
 
     if dock is not None and window.settings.dock_in_studio and dock.studio_running():
         window._status("Showing the camera inside eufyMake Studio's Device tab.", 5000)
+        if window._tray is not None:
+            # No window opens in this case, so say the app did start.
+            window._tray.showMessage(
+                "Wyze Print Monitor is running",
+                "It's inside eufyMake Studio: the camera on the Device tab, and ▴ on Print to "
+                "schedule. Click here (or the tray icon) for the full window.",
+                QSystemTrayIcon.Information,
+                8000,
+            )
     else:
         window.show()
     code = app.exec()

@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..async_runner import AsyncRunner
-from ..adjust import ImageAdjustments
+from ..adjust import ImageAdjustments, apply_adjustments
 from ..capture import ClipRecorder, StreamReader, snapshot_path
 from ..quality import display_width_for
 from ..quality import normalize as normalize_quality
@@ -692,9 +692,10 @@ class MainWindow(QMainWindow):
 
     def _present(self, frame: np.ndarray, image: QImage) -> None:
         self._last_frame = frame
-        for view in self.video_views:
-            if view.isVisible():
-                view.set_image(image)
+        if image is not None:
+            for view in self.video_views:
+                if view.isVisible():
+                    view.set_image(image)
         # Status text doesn't need 20 updates a second.
         now = time.monotonic()
         if now - self._last_labels < LABEL_REFRESH_S:
@@ -713,7 +714,7 @@ class MainWindow(QMainWindow):
 
     def _display_width(self) -> int:
         """Widest visible view in device pixels: frames are scaled to this on
-        the stream thread (0 while nothing is visible = no scaling)."""
+        the stream thread (-1 while nothing is visible: no image is made)."""
         w, h = self._reader.frame_size if self._reader is not None else (0, 0)
         aspect = w / h if w and h else 16 / 9
         fill = bool(self.settings.video_fill)
@@ -727,7 +728,7 @@ class MainWindow(QMainWindow):
             for view in self.video_views
             if view.isVisible()
         ]
-        return max(widths, default=0)
+        return max(widths, default=-1)
 
     def _on_recording_failed(self, failed, error: str) -> None:
         # e.g. folder became unwritable mid-recording: stop cleanly instead of
@@ -771,7 +772,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Snapshot", "No video frame available yet.")
             return
         path = snapshot_path(self.settings.resolved_snapshot_dir())
-        if cv2.imwrite(path, self._last_frame):
+        # Frames arrive before the picture adjustments (those are only worked
+        # out for what's on screen), so apply them to the full-size snapshot.
+        if cv2.imwrite(path, apply_adjustments(self._last_frame, self.adjustments)):
             self._status(f"Snapshot saved: {path}", 5000)
             self.capture_saved.emit(path)
         else:
