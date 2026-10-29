@@ -148,3 +148,54 @@ def test_mailbox_keeps_only_the_newest_frame_and_notifies_once(monkeypatch):
 
     reader._handle(np.full((4, 4, 3), 4, np.uint8))
     assert len(emitted) == 2              # mailbox emptied -> notify again
+
+
+def test_hidden_video_skips_the_display_image_and_adjustments(monkeypatch):
+    """Nothing on screen and nothing recording: the costly colour work and
+    display conversion are skipped (they took about a CPU core at 1080p)."""
+    import numpy as np
+
+    from wyze_print_monitor import capture
+    from wyze_print_monitor.adjust import ImageAdjustments
+
+    calls = []
+    monkeypatch.setattr(capture, "apply_adjustments", lambda f, a: calls.append("adjust") or f)
+    monkeypatch.setattr(capture, "to_display_image", lambda f, w: calls.append("image") or "image")
+    reader = capture.StreamReader("rtsp://cam/stream0", quality="1080p")
+    reader.frame_ready = type("Sig", (), {"emit": lambda self: None})()
+    reader.adjustments = ImageAdjustments(brightness=10)
+    reader.display_width = -1
+    raw = np.full((4, 4, 3), 7, np.uint8)
+    reader._handle(raw)
+    frame, image = reader.take_latest()
+    assert image is None and calls == []
+    assert frame is raw  # snapshots apply the adjustments themselves
+
+    written = []
+    reader.set_sinks(type("Rec", (), {"write": lambda self, f: written.append(f)})(), None)
+    reader._handle(raw)
+    assert calls == ["adjust"] and len(written) == 1  # recording still gets adjusted frames
+
+
+def test_display_frames_are_made_at_the_shown_size():
+    """The on-screen picture is cropped and shrunk before the colour work,
+    and still looks like the full-size adjusted frame scaled down."""
+    import cv2
+    import numpy as np
+
+    from wyze_print_monitor.adjust import ImageAdjustments, apply_adjustments
+    from wyze_print_monitor.capture import display_frame
+
+    y, x = np.mgrid[0:1080, 0:1920]
+    frame = np.dstack([x % 256, y % 256, (x + y) % 256]).astype(np.uint8)
+    frame = cv2.GaussianBlur(frame, (0, 0), 3)  # camera-like, no pixel noise
+    adj = ImageAdjustments(brightness=10, contrast=5, saturation=10, zoom=1.5, pan_x=0.3)
+    small = display_frame(frame, adj, 540)
+    assert small.shape[:2] == (304, 540)
+    reference = cv2.resize(apply_adjustments(frame, adj), (540, 304), interpolation=cv2.INTER_AREA)
+    assert np.abs(small.astype(int) - reference.astype(int)).mean() < 6
+
+    turned = display_frame(frame, ImageAdjustments(rotation=90, brightness=5), 540)
+    assert turned.shape[:2] == (960, 540)
+    assert display_frame(frame, ImageAdjustments(brightness=5), 0).shape[:2] == (1080, 1920)
+    assert display_frame(frame, ImageAdjustments(zoom=2.0), 0).shape[:2] == (1080, 1920)
